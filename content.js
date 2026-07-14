@@ -1,6 +1,39 @@
 'use strict';
 
 // ============================================================
+// 0. LOGGER (single source of truth for all debug output)
+// ============================================================
+
+/**
+ * Log message to console and optionally send to popup
+ * Automatically captures line number and function name for debugging
+ * @param {string} msg - Message to log
+ * @param {*} [data] - Optional extra data/object/error to log alongside msg
+ */
+function log(msg, data) {
+  const stack = new Error().stack;
+  const callerLine = stack.split('\n')[2] || '';
+  const match = callerLine.match(/at\s+(.+?)\s+\(.*:(\d+):\d+\)/) ||
+    callerLine.match(/at\s+.*:(\d+):\d+/);
+  let lineInfo = '';
+  if (match) {
+    const functionName = match[1] || 'anonymous';
+    const lineNumber = match[2] || match[1];
+    lineInfo = ` [${functionName}:${lineNumber}]`;
+  }
+  if (data !== undefined) {
+    console.log(`[Mohammad Tanvir's Bot]${lineInfo}`, msg, data);
+  } else {
+    console.log(`[Mohammad Tanvir's Bot]${lineInfo}`, msg);
+  }
+  try {
+    chrome.runtime.sendMessage({ type: 'log', message: msg });
+  } catch (e) {
+    // Popup not available, silently continue
+  }
+}
+
+// ============================================================
 // 1. CONFIGURATION
 // ============================================================
 
@@ -59,27 +92,27 @@ const Utils = {
     for (const sel of selectors) {
       const found = single ? container.querySelector(sel) : Array.from(container.querySelectorAll(sel));
       if (found && (!single ? found.length : true)) {
-        console.debug(`🔍 [AI Genie] Selector "${sel}" matched in ${context}`);
+        log(`🔍 Selector "${sel}" matched in ${context}`);
         return found;
       }
     }
-    console.warn(`⚠️ [AI Genie] No selectors matched in ${context}`);
+    log(`⚠️ No selectors matched in ${context}`);
     return single ? null : [];
   },
 
   async safeFetch(url, options, context = 'API call') {
     try {
-      console.debug(`🔍 [AI Genie] Fetching ${url}`);
+      log(`🔍 Fetching ${url}`);
       const res = await fetch(url, options);
       if (!res.ok) {
         const errorText = await res.text();
         throw new Error(`HTTP ${res.status}: ${errorText.slice(0, 100)}`);
       }
       const data = await res.json();
-      console.debug(`🔍 [AI Genie] Request succeeded for ${context}`);
+      log(`🔍 Request succeeded for ${context}`);
       return data;
     } catch (err) {
-      console.error(`❌ [AI Genie] Request failed in ${context}:`, err.message);
+      log(`❌ Request failed in ${context}:`, err.message);
       return null;
     }
   },
@@ -118,25 +151,33 @@ const Utils = {
 // 3. CONFIGURATION STORAGE
 // ============================================================
 
+
 const ConfigStorage = {
+  _warnedNoKey: false,
+
   async get() {
-    return new Promise((resolve) => {
-      chrome.storage.sync.get(['apiKey', 'apiProvider'], (data) => {
-        console.debug(`🔍 [AI Genie] Storage loaded`, data);
-        if (!data.apiKey) {
-          console.warn(`⚠️ [AI Genie] No API key found. Please set it in the popup.`);
+    try {
+      const data = await chrome.storage.sync.get(['apiKey', 'apiProvider']);
+      log('🔍 Storage loaded', data);
+      if (!data.apiKey) {
+        log('⚠️ No API key found. Please set it in the popup.');
+        if (!this._warnedNoKey) {
+          this._warnedNoKey = true;
           alert('Please set your API key in the extension popup.');
-          resolve(null);
-        } else {
-          resolve({
-            apiKey: data.apiKey,
-            provider: data.apiProvider || 'groq',
-          });
         }
-      });
-    });
+        return null;
+      }
+      return {
+        apiKey: data.apiKey,
+        provider: data.apiProvider || 'groq',
+      };
+    } catch (err) {
+      log('❌ Error loading storage:', err.message);
+      return null;
+    }
   },
 };
+
 
 // ============================================================
 // 4. DOM EXTRACTION
@@ -145,20 +186,47 @@ const ConfigStorage = {
 const DomExtractor = {
   extractAuthor(el) {
     if (!el) return null;
+
+    // 1. Try extracting from aria-label first
     const label = el.getAttribute('aria-label') || '';
-    const match = label.match(/^View (?:company: )?(.+?)(?:’s profile.*)?$/i);
-    return match ? match[1].replace(/'s profile.*/i, '').trim() : null;
+    if (label) {
+      // Matches both straight (') and curly (’) quotes directly in the regex
+      const match = label.match(/^View (?:company: )?(.+?)(?:['’]s profile.*)?$/i);
+      if (match) {
+        return match[1].trim();
+      }
+    }
+
+    // 2. Fallback: If aria-label is translated or missing, read the visible inner text
+    const visibleText = el.innerText?.trim();
+    if (visibleText && visibleText.length > 0 && visibleText.length < 60) {
+      // Filter out multiline text (e.g., if we grabbed a whole header card by mistake)
+      if (!visibleText.includes('\n')) {
+        return visibleText;
+      }
+    }
+
+    return null;
   },
 
   findPost(commentBox) {
-    const container = commentBox.closest('[role="listitem"]')?.parentElement || document;
-    return Utils.findElements(container, CONFIG.SELECTORS.postContainer, 'findPost', true);
+    // Search directly upwards for any selector that represents a LinkedIn post container
+    const postSelectors = CONFIG.SELECTORS.postContainer.join(',');
+    const post = commentBox.closest(postSelectors);
+
+    if (post) {
+      log('✅ Parent post container found directly:', post);
+      return post;
+    }
+
+    log('ℹ️ Direct post container not found. Searching document...');
+    return Utils.findElements(document, CONFIG.SELECTORS.postContainer, 'findPost', true);
   },
 
   extractPostContext(commentBox) {
     const post = this.findPost(commentBox);
     if (!post) {
-      console.warn(`⚠️ [AI Genie] Could not find parent post`);
+      log(`⚠️ Could not find parent post`);
       return { author: 'Someone', text: '' };
     }
     const authorEl = Utils.findElements(post, CONFIG.SELECTORS.authorLabel, 'extractAuthor', true);
@@ -188,7 +256,7 @@ const DomExtractor = {
     } else {
       prompt += `\nPlease write a reply to this post with a maximum of 60 words.`;
     }
-    console.log(`📝 [AI Genie] Built comment prompt:`, prompt);
+    log(`📝 Built comment prompt:`, prompt);
     return prompt;
   },
 };
@@ -199,6 +267,20 @@ const DomExtractor = {
 
 const AIService = {
   _modelCache: {},
+
+  /** Clear cached models when the user updates key/provider in the popup — avoids stale-model bugs. */
+  _initCacheInvalidation() {
+    try {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'sync' && (changes.apiKey || changes.apiProvider)) {
+          log('⚙️ Config changed — clearing model cache');
+          this._modelCache = {};
+        }
+      });
+    } catch (e) {
+      log('⚠️ Could not attach storage.onChanged listener', e.message);
+    }
+  },
 
   async _fetchModels(provider, apiKey) {
     if (this._modelCache[provider]) return this._modelCache[provider];
@@ -234,12 +316,12 @@ const AIService = {
       }
       if (models.length > 0) {
         this._modelCache[provider] = models;
-        console.log(`✅ [AI Genie] Fetched ${models.length} models for ${provider}:`, models);
+        log(`✅ Fetched ${models.length} models for ${provider}:`, models);
         return models;
       }
     }
 
-    console.warn(`⚠️ [AI Genie] Using fallback models for ${provider}`);
+    log(`⚠️ Using fallback models for ${provider}`);
     const fallback = CONFIG.FALLBACK_MODELS[provider] || [];
     this._modelCache[provider] = fallback;
     return fallback;
@@ -250,18 +332,18 @@ const AIService = {
     if (!config?.apiKey) return '';
 
     const { apiKey, provider } = config;
-    console.log(`🚀 [AI Genie] Using provider: ${provider}`);
+    log(`🚀 Using provider: ${provider}`);
 
     const isOpenAICompatible = provider === 'groq' || provider === 'openai';
     const models = await this._fetchModels(provider, apiKey);
     if (models.length === 0) {
-      console.error(`❌ [AI Genie] No models available for provider ${provider}`);
+      log(`❌ No models available for provider ${provider}`);
       return '';
     }
 
     for (const model of models) {
       try {
-        console.log(`🔄 [AI Genie] Trying model: ${model}`);
+        log(`🔄 Trying model: ${model}`);
         let url, headers = { 'Content-Type': 'application/json' };
         let body;
 
@@ -309,7 +391,7 @@ const AIService = {
           throw new Error(`Unsupported provider: ${provider}`);
         }
 
-        console.log(`📝 [AI Genie] Sending prompt to ${model}:`, prompt);
+        log(`📝 Sending prompt to ${model}:`, prompt);
 
         const data = await Utils.safeFetch(url, { method: 'POST', headers, body: JSON.stringify(body) }, `Call ${model}`);
         if (!data) continue;
@@ -325,17 +407,17 @@ const AIService = {
           // Clean: strip markdown and remove emojis
           let plain = Utils.stripMarkdown(content.trim());
           plain = Utils.removeEmojis(plain);
-          console.log(`📤 [AI Genie] Response from ${model}:`, plain);
+          log(`📤 Response from ${model}:`, plain);
           return plain;
         } else {
-          console.warn(`⚠️ [AI Genie] Empty or invalid response from ${model}`);
+          log(`⚠️ Empty or invalid response from ${model}`);
         }
       } catch (err) {
-        console.error(`❌ [AI Genie] Error with model ${model}:`, err.message);
+        log(`❌ Error with model ${model}:`, err.message);
       }
     }
 
-    console.error(`❌ [AI Genie] All models for ${provider} failed.`);
+    log(`❌ All models for ${provider} failed.`);
     return '';
   },
 
@@ -356,7 +438,7 @@ const AIService = {
 const EditorHandler = {
   insertText(editor, text) {
     if (!editor) {
-      console.error(`❌ [AI Genie] Editor element is null`);
+      log(`❌ Editor element is null`);
       return false;
     }
 
@@ -372,7 +454,7 @@ const EditorHandler = {
     let success = document.execCommand('insertHTML', false, htmlContent);
 
     if (!success || !editor.textContent.trim()) {
-      console.warn(`⚠️ [AI Genie] insertHTML incomplete, falling back to innerHTML`);
+      log(`⚠️ insertHTML incomplete, falling back to innerHTML`);
       editor.innerHTML = text.split('\n').map(l => l.trim() ? `<p>${l}</p>` : '<p><br></p>').join('');
       success = true;
     }
@@ -383,7 +465,7 @@ const EditorHandler = {
       editor.dispatchEvent(new InputEvent(evtType, { bubbles: true, cancelable: true, composed: true }));
     });
 
-    console.log(`✅ [AI Genie] Text inserted into editor`);
+    log(`✅ Text inserted into editor`);
     return true;
   },
 };
@@ -406,13 +488,13 @@ const UIInjector = {
     btn.addEventListener('click', async (e) => {
       e.preventDefault();
       e.stopPropagation();
-      console.log(`🖱️ [AI Genie] Comment AI button clicked`);
+      log(`🖱️ Comment AI button clicked`);
       const prompt = DomExtractor.buildCommentPrompt(commentBox);
       const reply = await AIService.fetchCommentReply(prompt);
       if (reply) {
         EditorHandler.insertText(editor, reply);
       } else {
-        console.error(`❌ [AI Genie] No reply generated`);
+        log(`❌ No reply generated`);
       }
     });
 
@@ -444,7 +526,7 @@ const UIInjector = {
     btn.addEventListener('click', async (e) => {
       e.preventDefault();
       e.stopPropagation();
-      console.log(`🖱️ [AI Genie] Post AI button clicked`);
+      log(`🖱️ Post AI button clicked`);
       const topic = await this._promptForTopic(editor);
       if (!topic) return;
 
@@ -531,40 +613,59 @@ const UIInjector = {
 
 const Scanner = {
   scanCommentBoxes() {
-    const boxes = Utils.findElements(document, CONFIG.SELECTORS.commentBox, 'scanComments', false);
-    for (const box of boxes) {
-      const editor = Utils.findElements(box, CONFIG.SELECTORS.commentEditor, 'commentEditor', true);
-      if (editor) UIInjector.createCommentButton(box, editor);
+    try {
+      const boxes = Utils.findElements(document, CONFIG.SELECTORS.commentBox, 'scanComments', false);
+      for (const box of boxes) {
+        const editor = Utils.findElements(box, CONFIG.SELECTORS.commentEditor, 'commentEditor', true);
+        if (editor) UIInjector.createCommentButton(box, editor);
+      }
+    } catch (err) {
+      log('❌ scanCommentBoxes failed — LinkedIn DOM may have changed', err.message);
     }
   },
 
   scanPostEditors() {
-    let editors = Utils.findElements(document, CONFIG.SELECTORS.postEditor, 'postEditors', false);
-    const shadowHost = document.querySelector(CONFIG.SELECTORS.shadowHost);
-    if (shadowHost?.shadowRoot) {
-      const shadowEditors = Utils.findElements(shadowHost.shadowRoot, CONFIG.SELECTORS.postEditor, 'postEditors(shadow)', false);
-      editors = editors.concat(shadowEditors);
-    }
-    const unique = new Set(editors);
-    for (const editor of unique) {
-      if (editor.hasAttribute('data-ai-post-mutated')) continue;
-      editor.setAttribute('data-ai-post-mutated', 'true');
-      UIInjector.createPostButton(editor);
+    try {
+      let editors = Utils.findElements(document, CONFIG.SELECTORS.postEditor, 'postEditors', false);
+      const shadowHost = document.querySelector(CONFIG.SELECTORS.shadowHost);
+      if (shadowHost?.shadowRoot) {
+        const shadowEditors = Utils.findElements(shadowHost.shadowRoot, CONFIG.SELECTORS.postEditor, 'postEditors(shadow)', false);
+        editors = editors.concat(shadowEditors);
+      }
+      const unique = new Set(editors);
+      for (const editor of unique) {
+        if (editor.hasAttribute('data-ai-post-mutated')) continue;
+        editor.setAttribute('data-ai-post-mutated', 'true');
+        UIInjector.createPostButton(editor);
+      }
+    } catch (err) {
+      log('❌ scanPostEditors failed — LinkedIn DOM may have changed', err.message);
     }
   },
 
   scanAll() {
-    console.debug(`🔍 [AI Genie] Running full scan...`);
+    log('🔍 Running full scan...');
     this.scanCommentBoxes();
     this.scanPostEditors();
   },
 
+  _observer: null,
+  _backupTimer: null,
+
   start() {
+    AIService._initCacheInvalidation();
     const debouncedScan = Utils.debounce(() => this.scanAll(), CONFIG.TIMEOUTS.scanDebounce);
-    const observer = new MutationObserver(debouncedScan);
-    observer.observe(document.body, { childList: true, subtree: true });
-    setInterval(() => this.scanAll(), CONFIG.TIMEOUTS.backupInterval);
-    console.log(`✅ [AI Genie] Observers and backup interval started.`);
+    this._observer = new MutationObserver(debouncedScan);
+    this._observer.observe(document.body, { childList: true, subtree: true });
+    this._backupTimer = setInterval(() => this.scanAll(), CONFIG.TIMEOUTS.backupInterval);
+    window.addEventListener('beforeunload', () => this.stop());
+    log('✅ Observers and backup interval started.');
+  },
+
+  stop() {
+    this._observer?.disconnect();
+    clearInterval(this._backupTimer);
+    log('🛑 Observers stopped (page unloading).');
   },
 };
 
