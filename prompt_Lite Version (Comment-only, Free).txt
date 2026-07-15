@@ -1,0 +1,64 @@
+Build a Chrome Extension (Manifest V3) called "AI LinkedIn Comment Generator (Lite)"
+that adds an AI-generated comment-reply button to LinkedIn's comment boxes.
+
+CORE FEATURE
+- On every LinkedIn comment box, inject a small "AI Suggestion" button.
+- When clicked, it should:
+  1. Find the parent post this comment box belongs to.
+  2. Extract the post author's name and post text.
+  3. If this is a reply to an existing comment (not a top-level comment),
+     also extract that parent comment's author and text.
+  4. Send this context to an AI provider to generate a short, human-sounding,
+     context-aware reply (no hashtags, occasional emoji, mention the author
+     by name only if it's a person, not a company).
+  5. Insert the generated reply directly into the comment box.
+
+AI PROVIDERS
+- Support OpenAI, Groq, and Google Gemini, selectable by the user.
+- Fetch the live list of available models from each provider's API at
+  runtime (cache it), with a hardcoded fallback model list per provider
+  in case that call fails.
+- If the first model fails/errors, automatically retry with the next
+  available model for that provider before giving up.
+
+SETTINGS UI
+- A popup (popup.html + popup.js) with:
+  - A dropdown to pick the AI provider
+  - A password-type input for the API key
+  - A "Save" button
+  - Settings persist via chrome.storage.local and auto-populate when
+    the popup is reopened.
+
+TECHNICAL REQUIREMENTS
+- Plain vanilla JS content script, no build step, no frameworks.
+- LinkedIn's DOM changes often — for every CSS selector, use an ARRAY of
+  fallback selectors (try each in order, first match wins), not a single
+  hardcoded selector.
+- Use a MutationObserver (debounced) PLUS a backup polling interval to
+  keep detecting new comment boxes as the user scrolls LinkedIn's
+  infinite feed.
+- For inserting generated text into LinkedIn's rich-text comment editor,
+  implement a 3-tier fallback: (1) simulated clipboard paste event,
+  (2) document.execCommand('insertHTML'), (3) direct innerHTML as a
+  last resort. Try each in order until one actually works.
+- Store the API key locally only — never send it anywhere except
+  directly to the chosen AI provider's API.
+
+DEBUGGABILITY (important)
+- Add a single shared log() helper that prefixes every message, and
+  auto-includes the calling function name + line number.
+- Log every meaningful step: which selector matched/failed and why,
+  every API call attempt and its result, every text-insertion strategy
+  attempt and why it moved to the next fallback, and any caught errors.
+- Wrap all DOM-scanning and API logic in try/catch so one failure never
+  breaks the rest of the extension.
+- Add a short header comment block at the top of the file mapping out
+  each section and explaining how to debug using the console logs.
+
+DELIVERABLES
+- manifest.json, content.js, popup.html, popup.js
+- A README.md explaining installation, setup, and usage
+- A short user guide (non-technical, step-by-step)
+
+Do NOT include any post-generation / post-composer functionality —
+this is the free, comment-only Lite edition.
