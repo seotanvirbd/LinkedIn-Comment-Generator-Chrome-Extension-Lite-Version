@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "LinkedIn Comment & Post Generator",
-  "description": "Generates AI-powered suggestions for LinkedIn comments and posts using OpenAI, Groq, or Gemini APIs.",
+  "name": "Tanvir's LinkedIn AI Comment Generator (Lite)",
+  "description": "Free Lite version: generates AI-powered LinkedIn comment replies using OpenAI, Groq, or Gemini APIs. Upgrade to Premium for AI post generation.",
   "version": "1.0",
   "content_scripts": [
     {
@@ -15,6 +15,11 @@
   ],
   "permissions": [
     "storage"
+  ],
+  "host_permissions": [
+    "https://api.groq.com/*",
+    "https://api.openai.com/*",
+    "https://generativelanguage.googleapis.com/*"
   ],
   "action": {
     "default_popup": "popup.html",
