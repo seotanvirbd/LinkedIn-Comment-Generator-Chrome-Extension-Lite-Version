@@ -1,59 +1,28 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <style>
-    body {
-      min-width: 350px;
-      background-color: #333;
-      color: #FFF;
-      font-family: 'Tahoma', sans-serif;
-      padding: 0 20px;
+{
+  "manifest_version": 3,
+  "name": "Tanvir's LinkedIn AI Comment Generator (Lite)",
+  "description": "Free Lite version: generates AI-powered LinkedIn comment replies using OpenAI, Groq, or Gemini APIs. Upgrade to Premium for AI post generation.",
+  "version": "1.0",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.linkedin.com/*"
+      ],
+      "js": [
+        "content.js"
+      ]
     }
-    #icon { max-width: 42px; float: left; margin-right: 15px; }
-    h1 { font-size: 16px; font-weight: normal; margin-bottom: 20px; }
-    .form-group { margin-bottom: 15px; clear: both; }
-    label { display: block; margin-bottom: 5px; font-size: 14px; }
-    select, input[type="text"] {
-      width: 100%; padding: 8px; border: 1px solid #555;
-      background-color: #444; color: #fff; border-radius: 4px;
-      font-size: 14px; box-sizing: border-box;
-    }
-    select:focus, input[type="text"]:focus { border-color: #0073b1; outline: none; }
-    button {
-      background-color: #0073b1; color: white; padding: 10px 20px;
-      border: none; border-radius: 4px; cursor: pointer;
-      font-size: 14px; margin-top: 10px;
-    }
-    button:hover { background-color: #005885; }
-    #status { margin-top: 10px; font-size: 12px; color: #4CAF50; }
-    .api-info { font-size: 11px; color: #ccc; margin-top: 5px; }
-  </style>
-</head>
-<body>
-  <img src="icon.png" id="icon" alt="LinkedIn Comment Genie Icon" />
-  <h1>LinkedIn Comment Genie</h1>
-  
-  <div class="form-group">
-    <label for="apiProvider">AI Provider:</label>
-    <select id="apiProvider">
-      <option value="openai">OpenAI </option>
-      <option value="groq">Groq Free</option>
-      <option value="gemini">Google Gemini (Free)</option>
-    </select>
-  </div>
-
-  <div class="form-group">
-    <label for="apiKey">API Key:</label>
-    <input id="apiKey" type="password" placeholder="Enter your API key" />
-    <div class="api-info" id="apiInfo">
-      Enter your API key for the selected provider.
-    </div>
-  </div>
-
-  <button id="save">Save Configuration</button>
-  <div id="status"></div>
-
-  <script src="popup.js"></script>
-</body>
-</html>
+  ],
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://api.groq.com/*",
+    "https://api.openai.com/*",
+    "https://generativelanguage.googleapis.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon.png"
+  }
+}
