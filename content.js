@@ -1,8 +1,45 @@
 'use strict';
 
 // ============================================================
+// AI LINKEDIN CHROME EXTENSION — CONTENT SCRIPT (LITE / FREE VERSION)
+// ============================================================
+// WHAT THIS FILE DOES
+//   Runs on linkedin.com. Watches the page for comment boxes and injects
+//   an "AI Suggestion" button, sends context to an AI provider
+//   (OpenAI/Groq/Gemini), and inserts the generated reply back into
+//   LinkedIn's comment editor.
+//
+//   NOTE: This is the LITE edition — AI POST GENERATION IS NOT INCLUDED.
+//   Only AI-assisted commenting is available. Upgrade to the Premium
+//   version for the "AI Post" composer feature.
+//
+// FILE MAP (search for these section headers)
+//   0. LOGGER            – console logging helper, also mirrors to popup
+//   1. CONFIGURATION      – all CSS selectors, prompts, endpoints, timeouts
+//   2. UTILITIES          – selector search, fetch wrapper, text cleanup
+//   3. CONFIGURATION STORAGE – reads apiKey/apiProvider from chrome.storage
+//   4. DOM EXTRACTION     – pulls author/post/comment text out of the page
+//   5. AI SERVICE         – builds requests to OpenAI/Groq/Gemini
+//   6. EDITOR HANDLER     – inserts generated text into LinkedIn's editor
+//   7. UI INJECTION       – creates & wires up the AI comment button
+//   8. SCANNER & OBSERVERS – MutationObserver + backup poll that (re)runs
+//                            the scan whenever LinkedIn re-renders the DOM
+//   9. INITIALIZATION     – kicks everything off
+//
+// HOW TO DEBUG
+//   Every meaningful step logs via log() below, prefixed
+//   "[Mohammad Tanvir's Bot]" with the calling function/line auto-attached.
+//   Open DevTools → Console on linkedin.com and filter by that prefix.
+//   If a selector stops matching (LinkedIn changed its markup), you'll see
+//   a "⚠️ No selectors matched in <context>" log naming exactly which
+//   lookup failed — update the matching array in CONFIG.SELECTORS.
+//   See DEVELOPER_GUIDE.md for the full breakage/troubleshooting workflow.
+// ============================================================
+
+// ============================================================
 // 0. LOGGER (single source of truth for all debug output)
 // ============================================================
+//version 3 1. 3 strategies added in editor handler
 
 /**
  * Log message to console and optionally send to popup
@@ -38,6 +75,11 @@ function log(msg, data) {
 // ============================================================
 
 const CONFIG = {
+  // Each key holds an ARRAY of CSS selectors, tried in order — first match wins
+  // (see Utils.findElements). Put the current/most-specific selector first and
+  // keep older ones as fallbacks. When LinkedIn changes its markup, add the
+  // new selector to the FRONT of the relevant array; console logs will tell
+  // you exactly which key needs updating (see file header / DEVELOPER_GUIDE.md).
   SELECTORS: {
     commentBox: ['[componentkey^="commentBox-"]', '[data-testid="comment-box"]', '.comment-box'],
     commentEditor: ['[contenteditable="true"][role="textbox"]', '.ProseMirror', 'textarea'],
@@ -46,8 +88,11 @@ const CONFIG = {
     postText: ['[data-testid="expandable-text-box"]', '.feed-shared-text', '.break-words'],
     authorLabel: ['figure[aria-label]', 'a[aria-label]', '[data-testid="feed-identity-label"]'],
     commentItem: ['[componentkey*="replaceableComment"]', '[data-testid="comment-item"]', '.comment-item'],
-    postEditor: ['[data-test-ql-editor-contenteditable="true"]', '[aria-label="Text editor for creating content"]', '.ql-editor'],
-    shadowHost: '#interop-outlet',
+    // NOTE (Lite version): postEditor/shadowHost selectors removed on purpose —
+    // they were only used by the AI Post composer feature (Premium-only).
+    // postContainer/postText/authorLabel above are still required: they let
+    // the comment feature read the ORIGINAL POST's context to write a
+    // relevant reply.
   },
 
   FALLBACK_MODELS: {
@@ -58,12 +103,13 @@ const CONFIG = {
 
   PROMPTS: {
     comment: `You are an assistant that writes replies to LinkedIn posts. Use same language, sound human, friendly, no hashtags, use occasional emojis, keep it brief, positive and add value. Mention author only if individual, not company.`,
-    post: `You are an expert LinkedIn creator. Use same language, sound authentic, use a scroll-stopping hook (1-2 lines), short paragraphs, natural emojis, 3-5 tags at the end. Keep plain text, 100-220 words, no markdown.`,
+    // NOTE (Lite version): "post" prompt template removed — AI Post
+    // generation is a Premium-only feature.
   },
 
   TIMEOUTS: {
     scanDebounce: 200,
-    backupInterval: 5000,
+    backupInterval: 1000,
     overlayFocusDelay: 50,
   },
 
@@ -106,10 +152,12 @@ const Utils = {
       const res = await fetch(url, options);
       if (!res.ok) {
         const errorText = await res.text();
+        // Common causes: 401/403 = bad/expired API key, 429 = rate limited,
+        // network/CORS error = host_permissions in manifest.json may be stale.
         throw new Error(`HTTP ${res.status}: ${errorText.slice(0, 100)}`);
       }
       const data = await res.json();
-      log(`🔍 Request succeeded for ${context}`);
+      log(`🔍 Request succeeded for ${context} (HTTP ${res.status})`);
       return data;
     } catch (err) {
       log(`❌ Request failed in ${context}:`, err.message);
@@ -157,7 +205,7 @@ const ConfigStorage = {
 
   async get() {
     try {
-      const data = await chrome.storage.sync.get(['apiKey', 'apiProvider']);
+      const data = await chrome.storage.local.get(['apiKey', 'apiProvider']);
       log('🔍 Storage loaded', data);
       if (!data.apiKey) {
         log('⚠️ No API key found. Please set it in the popup.');
@@ -185,7 +233,10 @@ const ConfigStorage = {
 
 const DomExtractor = {
   extractAuthor(el) {
-    if (!el) return null;
+    if (!el) {
+      log('⚠️ extractAuthor called with no element (authorLabel selector likely found nothing)');
+      return null;
+    }
 
     // 1. Try extracting from aria-label first
     const label = el.getAttribute('aria-label') || '';
@@ -193,8 +244,12 @@ const DomExtractor = {
       // Matches both straight (') and curly (’) quotes directly in the regex
       const match = label.match(/^View (?:company: )?(.+?)(?:['’]s profile.*)?$/i);
       if (match) {
+        log(`🔍 Author extracted from aria-label: "${match[1].trim()}"`);
         return match[1].trim();
       }
+      log(`⚠️ aria-label present but regex did not match: "${label}" — LinkedIn may have changed its aria-label wording`);
+    } else {
+      log('ℹ️ No aria-label on author element, trying innerText fallback');
     }
 
     // 2. Fallback: If aria-label is translated or missing, read the visible inner text
@@ -202,10 +257,15 @@ const DomExtractor = {
     if (visibleText && visibleText.length > 0 && visibleText.length < 60) {
       // Filter out multiline text (e.g., if we grabbed a whole header card by mistake)
       if (!visibleText.includes('\n')) {
+        log(`🔍 Author extracted from innerText fallback: "${visibleText}"`);
         return visibleText;
       }
+      log('⚠️ innerText fallback rejected: contains multiple lines (likely grabbed a whole card, not just the name)');
+    } else if (visibleText) {
+      log(`⚠️ innerText fallback rejected: length ${visibleText.length} (too long to be a name)`);
     }
 
+    log('❌ extractAuthor failed both aria-label and innerText strategies — returning null');
     return null;
   },
 
@@ -226,23 +286,36 @@ const DomExtractor = {
   extractPostContext(commentBox) {
     const post = this.findPost(commentBox);
     if (!post) {
-      log(`⚠️ Could not find parent post`);
+      log(`⚠️ Could not find parent post — AI prompt will be built without post context`);
       return { author: 'Someone', text: '' };
     }
     const authorEl = Utils.findElements(post, CONFIG.SELECTORS.authorLabel, 'extractAuthor', true);
     const author = this.extractAuthor(authorEl) || 'Someone';
     const textEl = Utils.findElements(post, CONFIG.SELECTORS.postText, 'extractText', true);
     const text = textEl?.innerText || '';
+    if (!textEl) {
+      log('⚠️ postText selector matched nothing — CONFIG.SELECTORS.postText may need updating for this post type');
+    }
+    log(`🔍 extractPostContext result: author="${author}", textLength=${text.length}`);
     return { author, text };
   },
 
   extractReplyContext(commentBox) {
+    // Returns null when this comment box is a top-level comment (not a reply-to-a-reply),
+    // which is expected and NOT an error — CONFIG.SELECTORS.commentItem just found no ancestor.
     const parent = commentBox.closest(CONFIG.SELECTORS.commentItem.join(','));
-    if (!parent) return null;
+    if (!parent) {
+      log('ℹ️ extractReplyContext: no ancestor comment item found — treating as a top-level comment');
+      return null;
+    }
     const authorEl = parent.querySelector(CONFIG.SELECTORS.authorLabel.join(','));
     const author = this.extractAuthor(authorEl) || 'A user';
     const textEl = parent.querySelector('[data-testid="expandable-text-box"], .comment__content');
     const text = textEl?.innerText || '';
+    if (!textEl) {
+      log('⚠️ Reply text selector matched nothing — LinkedIn may have renamed .comment__content');
+    }
+    log(`🔍 extractReplyContext result: author="${author}", textLength=${text.length}`);
     return { author, text };
   },
 
@@ -272,7 +345,7 @@ const AIService = {
   _initCacheInvalidation() {
     try {
       chrome.storage.onChanged.addListener((changes, area) => {
-        if (area === 'sync' && (changes.apiKey || changes.apiProvider)) {
+        if (area === 'local' && (changes.apiKey || changes.apiProvider)) {
           log('⚙️ Config changed — clearing model cache');
           this._modelCache = {};
         }
@@ -327,6 +400,9 @@ const AIService = {
     return fallback;
   },
 
+  // Tries each available model for the chosen provider in order until one
+  // returns usable content (handles deprecated/overloaded/quota-exhausted
+  // models gracefully instead of failing outright on the first one).
   async fetchContent(prompt, systemPrompt = CONFIG.PROMPTS.comment, maxTokens = 256) {
     const config = await ConfigStorage.get();
     if (!config?.apiKey) return '';
@@ -425,10 +501,8 @@ const AIService = {
     return this.fetchContent(prompt, CONFIG.PROMPTS.comment, 256);
   },
 
-  async fetchPost(topic) {
-    const prompt = `Write a ready-to-publish LinkedIn post about:\n"${topic}"`;
-    return this.fetchContent(prompt, CONFIG.PROMPTS.post, 700);
-  },
+  // NOTE (Lite version): fetchPost() removed — AI Post generation is a
+  // Premium-only feature.
 };
 
 // ============================================================
@@ -443,30 +517,93 @@ const EditorHandler = {
     }
 
     editor.focus();
-    const range = document.createRange();
-    range.selectNodeContents(editor);
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-    document.execCommand('delete', false);
+    let success = false;
 
-    const htmlContent = text.split('\n').map(line => line || '').join('<br>');
-    let success = document.execCommand('insertHTML', false, htmlContent);
+    // ── Strategy 1: Clipboard paste (most future-proof, Quill handles it natively) ──
+    try {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', text);
 
-    if (!success || !editor.textContent.trim()) {
-      log(`⚠️ insertHTML incomplete, falling back to innerHTML`);
-      editor.innerHTML = text.split('\n').map(l => l.trim() ? `<p>${l}</p>` : '<p><br></p>').join('');
+      // First clear existing content via select-all + delete
+      const selAll = window.getSelection();
+      const rangeAll = document.createRange();
+      rangeAll.selectNodeContents(editor);
+      selAll.removeAllRanges();
+      selAll.addRange(rangeAll);
+      document.execCommand('delete', false);
+
+      editor.dispatchEvent(new ClipboardEvent('paste', {
+        clipboardData: dt,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      }));
+
+      // Give Quill a tick to process the paste event
+      success = !!editor.textContent.trim();
+      if (success) {
+        log(`✅ Text inserted via clipboard paste (Strategy 1)`);
+      } else {
+        log(`⚠️ Strategy 1 (clipboard paste) ran without error but editor is still empty — falling back to Strategy 2`);
+      }
+    } catch (e) {
+      log(`⚠️ Strategy 1 (clipboard paste) threw an error: ${e.message} — falling back to Strategy 2`);
+    }
+
+    // ── Strategy 2: execCommand insertHTML (deprecated but widely supported) ──
+    if (!success) {
+      try {
+        const range = document.createRange();
+        range.selectNodeContents(editor);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        document.execCommand('delete', false);
+
+        const htmlContent = text.split('\n').map(line => line || '').join('<br>');
+        const cmdSuccess = document.execCommand('insertHTML', false, htmlContent);
+        success = cmdSuccess && !!editor.textContent.trim();
+        if (success) {
+          log(`✅ Text inserted via execCommand (Strategy 2)`);
+        } else {
+          log(`⚠️ Strategy 2 (execCommand) reported cmdSuccess=${cmdSuccess} but editor is still empty — falling back to Strategy 3`);
+        }
+      } catch (e) {
+        log(`⚠️ Strategy 2 (execCommand) threw an error: ${e.message} — falling back to Strategy 3`);
+      }
+    }
+
+    // ── Strategy 3: Direct innerHTML (last resort) ──
+    // This bypasses LinkedIn's editor framework (React/Quill) entirely, so it
+    // always "succeeds" at inserting text, but the framework may not register
+    // the change (e.g. the Post/Comment button might stay disabled). If you
+    // see this log a lot, Strategies 1 & 2 need fixing — this is a last resort.
+    if (!success) {
+      log(`⚠️ Strategies 1 & 2 both failed — falling back to direct innerHTML (Strategy 3, least reliable)`);
+      editor.innerHTML = text
+        .split('\n')
+        .map(l => l.trim() ? `<p>${l}</p>` : '<p><br></p>')
+        .join('');
       success = true;
     }
 
+    // ── Notify framework (React / Quill) of the change ──
     editor.classList.remove('ql-blank');
-    ['input', 'change', 'keyup'].forEach(evtType => {
+
+    // Dispatch proper event types — InputEvent only for 'input', Event for the rest
+    editor.dispatchEvent(new InputEvent('input', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      inputType: 'insertText',
+      data: text,
+    }));
+    ['change', 'keyup'].forEach(evtType => {
       editor.dispatchEvent(new Event(evtType, { bubbles: true, cancelable: true }));
-      editor.dispatchEvent(new InputEvent(evtType, { bubbles: true, cancelable: true, composed: true }));
     });
 
     log(`✅ Text inserted into editor`);
-    return true;
+    return success;
   },
 };
 
@@ -476,8 +613,12 @@ const EditorHandler = {
 
 const UIInjector = {
   createCommentButton(commentBox, editor) {
-    if (commentBox.hasAttribute('data-ai-mutated')) return;
+    if (commentBox.hasAttribute('data-ai-mutated')) {
+      log('⏭️ commentBox already mutated, skipping');
+      return;
+    }
     commentBox.setAttribute('data-ai-mutated', 'true');
+    log('🛠️ Creating comment AI button', { commentBox, editor });
 
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -488,123 +629,39 @@ const UIInjector = {
     btn.addEventListener('click', async (e) => {
       e.preventDefault();
       e.stopPropagation();
-      log(`🖱️ Comment AI button clicked`);
-      const prompt = DomExtractor.buildCommentPrompt(commentBox);
-      const reply = await AIService.fetchCommentReply(prompt);
-      if (reply) {
-        EditorHandler.insertText(editor, reply);
-      } else {
-        log(`❌ No reply generated`);
+      log('🖱️ Comment AI button clicked');
+      btn.disabled = true;
+      try {
+        const prompt = DomExtractor.buildCommentPrompt(commentBox);
+        log('⏳ Requesting comment reply from AIService...');
+        const reply = await AIService.fetchCommentReply(prompt);
+        if (reply) {
+          log('✅ Reply received, inserting into editor', reply);
+          EditorHandler.insertText(editor, reply);
+        } else {
+          log('❌ No reply generated (empty response from AIService)');
+        }
+      } catch (err) {
+        log('❌ Unexpected error handling comment click', err.message);
+      } finally {
+        btn.disabled = false;
       }
     });
 
     const toolbar = Utils.findElements(commentBox, CONFIG.SELECTORS.commentToolbar, 'commentToolbar', true);
     if (toolbar) {
+      log('✅ Toolbar found, prepending button to toolbar');
       toolbar.prepend(btn);
     } else if (editor.parentElement) {
+      log('⚠️ Toolbar not found, appending button to editor.parentElement as fallback');
       editor.parentElement.appendChild(btn);
+    } else {
+      log('❌ Could not attach comment button — no toolbar and no editor.parentElement');
     }
   },
 
-  createPostButton(editor) {
-    const container = editor.closest('.editor-container') || editor.parentElement;
-    if (!container || container.querySelector('[data-ai-post-btn="true"]')) return;
-
-    if (window.getComputedStyle(container).position === 'static') {
-      container.style.position = 'relative';
-    }
-
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.setAttribute('data-ai-post-btn', 'true');
-    btn.style.cssText = 'position:absolute; top:10px; right:10px; z-index:100; display:inline-flex; align-items:center; gap:6px; background:#0a66c2; color:#fff; border:none; border-radius:16px; padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer; box-shadow:0 2px 4px rgba(0,0,0,0.2);';
-    btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M2 6a6 6 0 1 1 10.174 4.31c-.203.196-.359.4-.453.619l-.762 1.769A.5.5 0 0 1 10.5 13h-5a.5.5 0 0 1-.46-.302l-.761-1.77a2 2 0 0 0-.453-.618A5.98 5.98 0 0 1 2 6m3 8.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1l-.224.447a1 1 0 0 1-.894.553H6.618a1 1 0 0 1-.894-.553L5.5 15a.5.5 0 0 1-.5-.5"/></svg><span>AI Post</span>`;
-
-    btn.onmouseover = () => btn.style.backgroundColor = '#004182';
-    btn.onmouseout = () => btn.style.backgroundColor = '#0a66c2';
-
-    btn.addEventListener('click', async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      log(`🖱️ Post AI button clicked`);
-      const topic = await this._promptForTopic(editor);
-      if (!topic) return;
-
-      btn.disabled = true;
-      btn.innerHTML = '<span>Generating…</span>';
-      btn.style.backgroundColor = '#5c5c5c';
-
-      const post = await AIService.fetchPost(topic);
-
-      btn.disabled = false;
-      btn.style.backgroundColor = '#0a66c2';
-      btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M2 6a6 6 0 1 1 10.174 4.31c-.203.196-.359.4-.453.619l-.762 1.769A.5.5 0 0 1 10.5 13h-5a.5.5 0 0 1-.46-.302l-.761-1.77a2 2 0 0 0-.453-.618A5.98 5.98 0 0 1 2 6m3 8.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1l-.224.447a1 1 0 0 1-.894.553H6.618a1 1 0 0 1-.894-.553L5.5 15a.5.5 0 0 1-.5-.5"/></svg><span>AI Post</span>`;
-
-      if (post) {
-        EditorHandler.insertText(editor, post);
-      } else {
-        alert('Could not generate a post. Please try again.');
-      }
-    });
-
-    container.appendChild(btn);
-  },
-
-  _promptForTopic(editor) {
-    return new Promise((resolve) => {
-      const root = editor.getRootNode();
-      const container = root instanceof ShadowRoot ? root : document.body;
-      container.querySelector('#ai-post-topic-overlay')?.remove();
-
-      const overlay = document.createElement('div');
-      overlay.id = 'ai-post-topic-overlay';
-      overlay.style.cssText = 'position:fixed; inset:0; z-index:999999; background:rgba(0,0,0,0.55); display:flex; align-items:center; justify-content:center; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;';
-
-      const box = document.createElement('div');
-      box.style.cssText = 'background:#1b1f23; color:#fff; padding:20px 22px; border-radius:8px; width:380px; max-width:90vw; box-shadow:0 8px 30px rgba(0,0,0,0.45);';
-      box.innerHTML = `
-        <h3 style="margin:0 0 8px;font-size:16px;font-weight:600;">✨ Generate a LinkedIn post</h3>
-        <p style="margin:0 0 10px;font-size:13px;color:#bbb;">What should this post be about?</p>
-        <textarea id="ai-post-topic-input" rows="3" placeholder="e.g. Benefits of web scraping..." style="width:100%;padding:8px;border-radius:4px;border:1px solid #444;background:#2b2f33;color:#fff;font-size:14px;resize:vertical;box-sizing:border-box;"></textarea>
-        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;">
-          <button id="ai-post-cancel-btn" type="button" style="padding:8px 14px;border:none;border-radius:16px;background:#3a3f44;color:#fff;cursor:pointer;font-size:13px;">Cancel</button>
-          <button id="ai-post-generate-btn" type="button" style="padding:8px 14px;border:none;border-radius:16px;background:#0a66c2;color:#fff;cursor:pointer;font-size:13px;font-weight:600;">Generate</button>
-        </div>`;
-
-      overlay.appendChild(box);
-      container.appendChild(overlay);
-
-      ['keydown', 'keyup', 'keypress', 'mousedown', 'mouseup', 'click', 'contextmenu'].forEach(evt =>
-        box.addEventListener(evt, e => e.stopPropagation())
-      );
-
-      const input = box.querySelector('#ai-post-topic-input');
-      setTimeout(() => input.focus(), CONFIG.TIMEOUTS.overlayFocusDelay);
-
-      const cleanup = (result) => {
-        overlay.remove();
-        resolve(result);
-      };
-
-      box.querySelector('#ai-post-cancel-btn').addEventListener('click', () => cleanup(null));
-      box.querySelector('#ai-post-generate-btn').addEventListener('click', () => {
-        const val = input.value.trim();
-        cleanup(val || null);
-      });
-      overlay.addEventListener('click', (e) => {
-        if (e.target === overlay) cleanup(null);
-      });
-      input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-          box.querySelector('#ai-post-generate-btn').click();
-        }
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          cleanup(null);
-        }
-      });
-    });
-  },
+  // NOTE (Lite version): createPostButton() and _promptForTopic() removed —
+  // AI Post generation is a Premium-only feature.
 };
 
 // ============================================================
@@ -624,40 +681,39 @@ const Scanner = {
     }
   },
 
-  scanPostEditors() {
-    try {
-      let editors = Utils.findElements(document, CONFIG.SELECTORS.postEditor, 'postEditors', false);
-      const shadowHost = document.querySelector(CONFIG.SELECTORS.shadowHost);
-      if (shadowHost?.shadowRoot) {
-        const shadowEditors = Utils.findElements(shadowHost.shadowRoot, CONFIG.SELECTORS.postEditor, 'postEditors(shadow)', false);
-        editors = editors.concat(shadowEditors);
-      }
-      const unique = new Set(editors);
-      for (const editor of unique) {
-        if (editor.hasAttribute('data-ai-post-mutated')) continue;
-        editor.setAttribute('data-ai-post-mutated', 'true');
-        UIInjector.createPostButton(editor);
-      }
-    } catch (err) {
-      log('❌ scanPostEditors failed — LinkedIn DOM may have changed', err.message);
-    }
-  },
+  // NOTE (Lite version): scanPostEditors() removed — AI Post generation is
+  // a Premium-only feature, so the post composer is never scanned.
 
   scanAll() {
-    log('🔍 Running full scan...');
+    log('🔍 Running full scan (comments only — Lite version)...');
     this.scanCommentBoxes();
-    this.scanPostEditors();
   },
 
   _observer: null,
   _backupTimer: null,
+  _observerFireCount: 0,
 
   start() {
     AIService._initCacheInvalidation();
-    const debouncedScan = Utils.debounce(() => this.scanAll(), CONFIG.TIMEOUTS.scanDebounce);
+    const debouncedScan = Utils.debounce(() => {
+      this._observerFireCount++;
+      this.scanAll();
+    }, CONFIG.TIMEOUTS.scanDebounce);
     this._observer = new MutationObserver(debouncedScan);
     this._observer.observe(document.body, { childList: true, subtree: true });
-    this._backupTimer = setInterval(() => this.scanAll(), CONFIG.TIMEOUTS.backupInterval);
+
+    // Backup interval runs at normal speed until the MutationObserver proves
+    // itself reliable (a few successful fires), then slows down to save CPU
+    // on long-running LinkedIn sessions. It never fully stops, as a safety net.
+    this._backupTimer = setInterval(() => {
+      this.scanAll();
+      if (this._observerFireCount >= 3) {
+        log('🐢 MutationObserver proven reliable — slowing backup interval to save CPU');
+        clearInterval(this._backupTimer);
+        this._backupTimer = setInterval(() => this.scanAll(), CONFIG.TIMEOUTS.backupInterval * 6);
+      }
+    }, CONFIG.TIMEOUTS.backupInterval);
+
     window.addEventListener('beforeunload', () => this.stop());
     log('✅ Observers and backup interval started.');
   },
@@ -672,5 +728,13 @@ const Scanner = {
 // ============================================================
 // 9. INITIALIZATION
 // ============================================================
+// If this section never logs "Extension initialized", the content script
+// itself failed to load/run — check chrome://extensions for a red "Errors"
+// badge, or check the Console for a syntax error thrown before this point.
 
-Scanner.start();
+try {
+  log('🚀 Extension initialized — starting DOM scanner and observers');
+  Scanner.start();
+} catch (err) {
+  log('❌ FATAL: Scanner failed to start — extension will not function on this page', err.message);
+}
