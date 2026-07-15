@@ -1,9 +1,9 @@
-// Saves options to chrome.storage
+// get api key and api provider from popup.html input and save to chrome.storage
 const saveOptions = () => {
   const apiKey = document.getElementById("apiKey").value;
   const apiProvider = document.getElementById("apiProvider").value;
 
-  chrome.storage.sync.set({ apiKey, apiProvider }, () => {
+  chrome.storage.local.set({ apiKey, apiProvider }, () => {
     console.log("✅ Options saved:", { apiKey, apiProvider });
     const status = document.getElementById("status");
     status.textContent = "Options saved.";
@@ -11,9 +11,10 @@ const saveOptions = () => {
   });
 };
 
-// Restores select box and input state using stored preferences
+// get api key and api provider from previously saved chrome.storage and 
+// get popup.html input UI so that user can see the previously saved values
 const restoreOptions = () => {
-  chrome.storage.sync.get(
+  chrome.storage.local.get(
     { apiKey: "", apiProvider: "groq" }, // default to groq
     (items) => {
       document.getElementById("apiKey").value = items.apiKey;
@@ -23,5 +24,5 @@ const restoreOptions = () => {
   );
 };
 
-document.addEventListener("DOMContentLoaded", restoreOptions);
-document.getElementById("save").addEventListener("click", saveOptions);
+document.addEventListener("DOMContentLoaded", restoreOptions); //Open popup → restoreOptions → UI shows saved values.
+document.getElementById("save").addEventListener("click", saveOptions); //Click Save → saveOptions → values stored in Chrome sync.
