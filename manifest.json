@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Tanvir's LinkedIn AI Comment Generator (Lite)",
+  "name": "Tanvir's LinkedIn AI Comment Generator v1.0-lite",
   "description": "Free Lite version: generates AI-powered LinkedIn comment replies using OpenAI, Groq, or Gemini APIs. Upgrade to Premium for AI post generation.",
   "version": "1.0",
   "content_scripts": [
