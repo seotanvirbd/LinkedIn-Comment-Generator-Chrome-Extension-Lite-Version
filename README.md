@@ -5,7 +5,7 @@ A free, lightweight Chrome extension that adds an AI-powered "Generate" button t
 > 💎 **This is the Lite (free) edition.** It generates AI comment replies only. For AI-generated LinkedIn posts as well, upgrade to the **Premium** version.
 
 <p align="center">
-  <img src="linkedin_comment_generator_original_button.png" alt="AI LinkedIn Comment Generator Icon"  />
+  <img src="linkedin_comment_generator_original_button.png" alt="AI LinkedIn Comment Generator Icon" width="500" />
 </p>
 
 ---
