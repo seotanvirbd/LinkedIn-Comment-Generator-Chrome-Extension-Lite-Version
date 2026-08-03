@@ -130,6 +130,40 @@ const CONFIG = {
 };
 
 // ============================================================
+// 1b. UPGRADE / LIMIT LOGIC
+// ============================================================
+const FREE_DAILY_LIMIT = 10;
+const PRO_LINKS = { bd: 'https://seotanvirbd.com/product/ai-linkedin-post-comment-generator-pro-unlimited-ai-automation-for-chrome/',
+                    intl: 'https://mohammadtanvir.gumroad.com/l/yhxkvp' };
+
+const Upgrade = {
+  async getLink() {
+    const { country = 'intl' } = await chrome.storage.local.get('country');
+    return PRO_LINKS[country] || PRO_LINKS.intl;
+  },
+  // Returns usage count AFTER incrementing (resets daily)
+  async checkAndCountUsage() {
+    const today = new Date().toISOString().slice(0, 10);
+    const { usageDate, usageCount = 0 } = await chrome.storage.local.get(['usageDate', 'usageCount']);
+    const count = usageDate === today ? usageCount : 0;
+    await chrome.storage.local.set({ usageDate: today, usageCount: count + 1 });
+    return count + 1;
+  },
+  async showBanner() {
+    if (document.getElementById('ai-upgrade-banner')) return;
+    const link = await this.getLink();
+    const banner = document.createElement('div');
+    banner.id = 'ai-upgrade-banner';
+    banner.innerHTML = `You've hit today's free limit (${FREE_DAILY_LIMIT}).
+      <a href="${link}" target="_blank" style="color:#fff;text-decoration:underline;">Upgrade to Pro — unlimited →</a>
+      <span style="cursor:pointer;margin-left:10px;" id="ai-upgrade-close">✕</span>`;
+    banner.style.cssText = 'position:fixed;bottom:20px;right:20px;background:#0073b1;color:#fff;padding:12px 16px;border-radius:8px;z-index:99999;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.3);';
+    document.body.appendChild(banner);
+    document.getElementById('ai-upgrade-close').onclick = () => banner.remove();
+  },
+};
+
+// ============================================================
 // 2. UTILITIES
 // ============================================================
 
@@ -630,6 +664,12 @@ const UIInjector = {
       e.preventDefault();
       e.stopPropagation();
       log('🖱️ Comment AI button clicked');
+      const usedToday = await Upgrade.checkAndCountUsage();
+      if (usedToday > FREE_DAILY_LIMIT) {
+        log(`⛔ Free daily limit (${FREE_DAILY_LIMIT}) reached — showing upgrade banner`);
+        Upgrade.showBanner();
+        return;
+      }
       btn.disabled = true;
       try {
         const prompt = DomExtractor.buildCommentPrompt(commentBox);
